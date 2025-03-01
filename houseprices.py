@@ -17,8 +17,8 @@ import numpy as np
 
 DATA_PATH_TRAIN = 'data/train.csv'
 DATA_PATH_TEST = 'data/test.csv'
-BATCH_SIZE = 32
-LEARNING_RATE = 0.0001
+BATCH_SIZE = 3000
+LEARNING_RATE = 0.001
 EPOCHS = 3000
 DEVICE = torch.device("cpu") # Try CUDA on NVIDIA GPU or MPS on Apple Silicon (might yield faster performance)
 
@@ -28,7 +28,9 @@ def preprocessdata(train_path, test_path):
     test_df = pd.read_csv(test_path)
 
     y = train_df['SalePrice']
-    X = train_df.drop(columns=['SalePrice'])
+    X = train_df.drop(columns=['Id', 'SalePrice'])
+
+    test_df = test_df.drop(columns=['Id'])
 
     
     categorical_cols = X.select_dtypes(include=['object']).columns
@@ -80,32 +82,41 @@ class HousePriceModel(nn.Module):
         super(HousePriceModel, self).__init__()
         # TODO: Experiement with more layers (but try to prevent overfitting)
         self.layers = nn.Sequential(
-            nn.Linear(input_size, 128),
+            nn.Linear(input_size, 64),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(128, 64),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(64, 1)
+            nn.Linear(32, 1)
         )
 
     def forward(self, x):
-        return self.layers(x)
+        embedded = self.embedding(x)  # (batch_size, seq_len, embed_dim)
+        embedded = embedded.unsqueeze(1) # adding a sequence dimension to allow multihead attention.
+        attention_output, _ = self.attention(embedded, embedded, embedded)
+        attention_output = attention_output.squeeze(1) # removing the sequence dimension after attention.
+        output = self.layers(attention_output)
+        return output
 
 input_size = X_train.shape[1]
 model = HousePriceModel(input_size).to(DEVICE)
 
-criterion = nn.MSELoss() # TODO: Implement custm loss fucntion since Kaggle uses RMSD
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-# scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-#     optimizer,
-#     mode='min',
-#     factor=0.5,
-#     patience=50,
-#     min_lr=1e-6
-# )
+def rmse_loss(y_pred, y_true):
+    return torch.sqrt(torch.mean((y_pred - y_true)**2))
 
-def train_model(model, train_loader, criterion, optimizer, epochs, device):
+# criterion = nn.MSELoss() # TODO: Implement custm loss fucntion since Kaggle uses RMSD
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.5,
+    patience=50,
+    min_lr=1e-6
+)
+
+
+def train_model(model, train_loader, optimizer, epochs, device):
     progress_bar = tqdm(range(epochs), desc='Training Progress', leave=True)
     model.train()
     for _ in progress_bar:
@@ -114,11 +125,11 @@ def train_model(model, train_loader, criterion, optimizer, epochs, device):
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
             outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+            loss = rmse_loss(outputs, y_batch)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-        # TODO: Not a great system training and then validating every cycle, so use Scheduler to determine LR
+
         model.eval()
         all_preds_tensor = []
         all_targets_tensor = []
@@ -136,12 +147,12 @@ def train_model(model, train_loader, criterion, optimizer, epochs, device):
         all_targets = target_scaler.inverse_transform(all_targets_tensor).flatten()
 
         mae = np.mean(np.abs(all_preds - all_targets))
+
+        model.train()
+        scheduler.step(np.mean(epoch_loss/len(train_loader)))
         progress_bar.set_postfix(mae=mae, lr = scheduler.get_last_lr())
 
-        model.train() 
-        # scheduler.step(np.mean(epoch_loss/len(train_loader)))
-
-train_model(model, train_loader, criterion, optimizer, EPOCHS, DEVICE)
+train_model(model, train_loader, optimizer, EPOCHS, DEVICE)
 
 model.eval()
 all_preds = []
