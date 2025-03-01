@@ -1,3 +1,10 @@
+"""
+House Price Predictor for Kaggle's House Prices: Advanced Regression Techniques competition
+Uses a Deep AI approach instead of traditional Random Forrest Approach
+Current Accuracy: ~ $17k with only 100 epochs, 2 layers (can increase but need more compute)
+"""
+
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -5,28 +12,25 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from tqdm import tqdm
+from tqdm import tqdm # not sure how much of a performance hit this is since its python while everything else is c
+import numpy as np
 
-# Configuration
 DATA_PATH_TRAIN = 'data/train.csv'
 DATA_PATH_TEST = 'data/test.csv'
 BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-EPOCHS = 1000
+LEARNING_RATE = 0.0001
+EPOCHS = 3000
+DEVICE = torch.device("cpu") # Try CUDA on NVIDIA GPU or MPS on Apple Silicon (might yield faster performance)
 
-# Device configuration
-DEVICE = torch.device("cpu") # or "mps" if available
-
-# Data Loading and Preprocessing
-def load_and_preprocess_data(train_path, test_path):
-    """Loads and preprocesses the training and test data."""
+def preprocessdata(train_path, test_path):
+    """quick function for importing and preprocessing data"""
     train_df = pd.read_csv(train_path)
     test_df = pd.read_csv(test_path)
 
     y = train_df['SalePrice']
     X = train_df.drop(columns=['SalePrice'])
 
-    # Categorical Feature Encoding
+    
     categorical_cols = X.select_dtypes(include=['object']).columns
     for col in categorical_cols:
         le = LabelEncoder()
@@ -35,7 +39,7 @@ def load_and_preprocess_data(train_path, test_path):
         X[col] = le.fit_transform(X[col].astype(str))
         test_df[col] = test_df[col].map(lambda s: le.transform([s])[0] if s in le.classes_ else -1)
 
-    # Numerical Feature Imputation and Scaling
+    
     X.fillna(X.median(), inplace=True)
     test_df.fillna(test_df.median(), inplace=True)
 
@@ -45,12 +49,15 @@ def load_and_preprocess_data(train_path, test_path):
 
     return X, y, test_df
 
-X, y, test_df = load_and_preprocess_data(DATA_PATH_TRAIN, DATA_PATH_TEST)
+X, y, test_df = preprocessdata(DATA_PATH_TRAIN, DATA_PATH_TEST)
 
-# Data Splitting
+target_scaler = StandardScaler()
+y = target_scaler.fit_transform(y.values.reshape(-1, 1))
+y = pd.Series(y.flatten())  
+
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Dataset and DataLoader
+# createa  house dataset class to be used in dataloader
 class HouseDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X.values, dtype=torch.float32)
@@ -68,10 +75,10 @@ val_dataset = HouseDataset(X_val, y_val)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-# Model Definition
 class HousePriceModel(nn.Module):
     def __init__(self, input_size):
         super(HousePriceModel, self).__init__()
+        # TODO: Experiement with more layers (but try to prevent overfitting)
         self.layers = nn.Sequential(
             nn.Linear(input_size, 128),
             nn.ReLU(),
@@ -88,13 +95,17 @@ class HousePriceModel(nn.Module):
 input_size = X_train.shape[1]
 model = HousePriceModel(input_size).to(DEVICE)
 
-# Loss and Optimizer
-criterion = nn.MSELoss()
+criterion = nn.MSELoss() # TODO: Implement custm loss fucntion since Kaggle uses RMSD
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+# scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+#     optimizer,
+#     mode='min',
+#     factor=0.5,
+#     patience=50,
+#     min_lr=1e-6
+# )
 
-# Training Function
 def train_model(model, train_loader, criterion, optimizer, epochs, device):
-    """Trains the model."""
     progress_bar = tqdm(range(epochs), desc='Training Progress', leave=True)
     model.train()
     for _ in progress_bar:
@@ -107,7 +118,42 @@ def train_model(model, train_loader, criterion, optimizer, epochs, device):
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-        progress_bar.set_postfix(loss=epoch_loss / len(train_loader))
+        # TODO: Not a great system training and then validating every cycle, so use Scheduler to determine LR
+        model.eval()
+        all_preds_tensor = []
+        all_targets_tensor = []
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                outputs = model(X_batch)
+                all_preds_tensor.append(outputs)
+                all_targets_tensor.append(y_batch)
 
-# Model Training
+        all_preds_tensor = torch.cat(all_preds_tensor).cpu().numpy()
+        all_targets_tensor = torch.cat(all_targets_tensor).cpu().numpy()
+
+        all_preds = target_scaler.inverse_transform(all_preds_tensor).flatten()
+        all_targets = target_scaler.inverse_transform(all_targets_tensor).flatten()
+
+        mae = np.mean(np.abs(all_preds - all_targets))
+        progress_bar.set_postfix(mae=mae, lr = scheduler.get_last_lr())
+
+        model.train() 
+        # scheduler.step(np.mean(epoch_loss/len(train_loader)))
+
 train_model(model, train_loader, criterion, optimizer, EPOCHS, DEVICE)
+
+model.eval()
+all_preds = []
+all_targets = []
+with torch.no_grad():
+    for X_batch, y_batch in val_loader:
+        X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+        outputs = model(X_batch)
+        all_preds.extend(outputs.cpu().numpy())
+        all_targets.extend(y_batch.cpu().numpy())
+
+all_preds = target_scaler.inverse_transform(all_preds).flatten()
+all_targets = target_scaler.inverse_transform(all_targets).flatten()
+
+print(f"RMSD: {np.sqrt(np.mean((all_preds - all_targets)**2))}") # this is the metric used in Kaggle Leaderboard
