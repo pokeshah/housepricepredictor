@@ -10,9 +10,9 @@ import numpy as np
 
 DATA_PATH_TRAIN = 'data/train.csv'
 DATA_PATH_TEST = 'data/test.csv'
-BATCH_SIZE = 256  # Reduced batch size
-LEARNING_RATE = 0.001 # Reduced learning rate
-EPOCHS = 5000  # Increased epochs (rely on early stopping)
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 5000
 DEVICE = torch.device("cpu")
 
 train_df = pd.read_csv(DATA_PATH_TRAIN)
@@ -48,18 +48,15 @@ test_features = preprocess_data(test_features_df, train_columns=train_features.c
 
 X_train, X_val, y_train, y_val = train_test_split(train_features, train_prices, test_size=0.2, random_state=42)
 
-# Scale features *after* splitting!
-feature_scaler = StandardScaler()  # Or StandardScaler, experiment
+feature_scaler = StandardScaler()
 X_train = feature_scaler.fit_transform(X_train)
 X_val = feature_scaler.transform(X_val)
 test_features = feature_scaler.transform(test_features)
 
-# Scale the target variable (keep the scaler!)
 price_scaler = StandardScaler()
 y_train = price_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
 y_val = price_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
 
-# Convert back to DataFrames for easier handling with column names
 X_train = pd.DataFrame(X_train, columns=train_features.columns)
 X_val = pd.DataFrame(X_val, columns=train_features.columns)
 test_features = pd.DataFrame(test_features, columns=train_features.columns)
