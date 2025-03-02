@@ -113,10 +113,11 @@ def rmse_loss(predictions, targets):
     return torch.sqrt(torch.mean((predictions - targets)**2))
 
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100, min_lr=1e-6)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-6)
 
 def train_model(model, train_loader, val_loader, optimizer, scheduler, price_scaler, epochs, device, patience=20):
     best_val_loss = float('inf')
+    best_mae = float('inf')
     best_model_state = None
     no_improve_count = 0
     history = {'train_loss': [], 'val_loss': [], 'val_mae': [], 'lr': []}
@@ -180,6 +181,7 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, price_sca
         # Early stopping
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            best_mae = val_mae
             best_model_state = model.state_dict().copy()
             no_improve_count = 0
         else:
@@ -191,7 +193,7 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, price_sca
 
         # Print progress
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, "
-              f"Val MAE: ${val_mae:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
+              f"Val MAE: ${val_mae:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}, Best Mae: ${best_mae:.2f}")
 
     # Restore best model
     if best_model_state is not None:
@@ -199,7 +201,7 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, price_sca
 
     return model, history
 
-model, history = train_model(
+best, history = train_model(
     model,
     train_loader,
     val_loader,
@@ -210,15 +212,17 @@ model, history = train_model(
     DEVICE,
     patience=200
 )
-model.eval()
+
+best.eval()
 test_predictions = []
 with torch.no_grad():
     for features in test_loader:
         features = features.to(DEVICE)
-        outputs = model(features)
+        outputs = best(features)
         test_predictions.extend(outputs.cpu().numpy())
 
 test_predictions = price_scaler.inverse_transform(test_predictions).flatten()
 
 submission_df = pd.DataFrame({'Id': test_ids, 'SalePrice': test_predictions})
 print(submission_df)
+submission_df.to_csv('submission.csv', index=False)
