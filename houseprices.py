@@ -10,9 +10,9 @@ import numpy as np
 
 DATA_PATH_TRAIN = 'data/train.csv'
 DATA_PATH_TEST = 'data/test.csv'
-BATCH_SIZE = 3000
-LEARNING_RATE = 0.01
-EPOCHS = 3000
+BATCH_SIZE = 256  # Reduced batch size
+LEARNING_RATE = 0.001 # Reduced learning rate
+EPOCHS = 5000  # Increased epochs (rely on early stopping)
 DEVICE = torch.device("cpu")
 
 train_df = pd.read_csv(DATA_PATH_TRAIN)
@@ -45,17 +45,27 @@ def preprocess_data(data, train_columns=None):
 train_features = preprocess_data(train_features_df)
 test_features = preprocess_data(test_features_df, train_columns=train_features.columns)
 
+
+X_train, X_val, y_train, y_val = train_test_split(train_features, train_prices, test_size=0.2, random_state=42)
+
+# Scale features *after* splitting!
+feature_scaler = StandardScaler()  # Or StandardScaler, experiment
+X_train = feature_scaler.fit_transform(X_train)
+X_val = feature_scaler.transform(X_val)
+test_features = feature_scaler.transform(test_features)
+
+# Scale the target variable (keep the scaler!)
 price_scaler = StandardScaler()
-scaled_train_prices = price_scaler.fit_transform(train_prices.values.reshape(-1, 1))
-scaled_train_prices = pd.Series(scaled_train_prices.flatten())
+y_train = price_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_val = price_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
 
-
-X_train, X_val, y_train, y_val = train_test_split(train_features, scaled_train_prices, test_size=0.2, random_state=42)
-
-feature_scaler = StandardScaler()
+# Convert back to DataFrames for easier handling with column names
 X_train = pd.DataFrame(X_train, columns=train_features.columns)
 X_val = pd.DataFrame(X_val, columns=train_features.columns)
-test_features = pd.DataFrame(test_features, columns=test_features.columns)
+test_features = pd.DataFrame(test_features, columns=train_features.columns)
+y_train = pd.Series(y_train)
+y_val = pd.Series(y_val)
+
 
 class HousePriceDataset(Dataset):
     def __init__(self, features, prices=None):
