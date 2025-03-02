@@ -1,152 +1,217 @@
-"""
-House Price Predictor for Kaggle's House Prices: Advanced Regression Techniques competition
-Uses a Deep AI approach instead of traditional Random Forrest Approach
-Current Accuracy: ~ $17k with only 1500 epochs, 2 layers (can increase but need more compute)
-"""
-
-
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from tqdm import tqdm # not sure how much of a performance hit this is since its python while everything else is c
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error
 import numpy as np
 
 DATA_PATH_TRAIN = 'data/train.csv'
 DATA_PATH_TEST = 'data/test.csv'
 BATCH_SIZE = 3000
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.01
 EPOCHS = 3000
-DEVICE = torch.device("cpu") # Try CUDA on NVIDIA GPU or MPS on Apple Silicon (might yield faster performance)
+DEVICE = torch.device("cpu")
 
-def preprocessdata(train_path, test_path):
-    train_df = pd.read_csv(train_path)
-    test_df = pd.read_csv(test_path)
+train_df = pd.read_csv(DATA_PATH_TRAIN)
+test_df = pd.read_csv(DATA_PATH_TEST)
 
-    y = train_df['SalePrice']
-    X = train_df.drop(columns=['Id', 'SalePrice'])
-    test_df_ids = test_df['Id']
-    test_df = test_df.drop(columns=['Id'])
+train_prices = train_df['SalePrice']
+test_ids = test_df['Id']
+train_features_df = train_df.drop(columns=['Id', 'SalePrice'])
+test_features_df = test_df.drop(columns=['Id'])
 
-    categorical_cols = X.select_dtypes(include=['object']).columns
-    for col in categorical_cols:
-        le = LabelEncoder()
-        X[col] = X[col].fillna('Missing')
-        test_df[col] = test_df[col].fillna('Missing')
-        X[col] = le.fit_transform(X[col].astype(str))
-        test_df[col] = test_df[col].map(lambda s: le.transform([s])[0] if s in le.classes_ else -1)
+def preprocess_data(data, train_columns=None):
+    data.dropna(axis=1, thresh=int(0.85 * len(data)), inplace=True)
 
-    X.fillna(X.median(), inplace=True)
-    test_df.fillna(test_df.median(), inplace=True)
+    numeric_columns = data.select_dtypes(exclude=['object']).columns
+    categorical_columns = data.select_dtypes(include=['object']).columns
 
-    scaler = StandardScaler()
-    X[X.columns] = scaler.fit_transform(X[X.columns])
-    test_df[test_df.columns] = scaler.transform(test_df[test_df.columns])
+    data[numeric_columns] = data[numeric_columns].fillna(data[numeric_columns].median())
+    data[categorical_columns] = data[categorical_columns].fillna('Unknown')
 
-    return X, y, test_df, test_df_ids
+    data = pd.get_dummies(data, columns=categorical_columns, dummy_na=False)
 
-X, y, test_df, test_df_ids = preprocessdata(DATA_PATH_TRAIN, DATA_PATH_TEST)
+    if train_columns is not None:
+        missing_cols = set(train_columns) - set(data.columns)
+        for col in missing_cols:
+            data[col] = 0
+        data = data[train_columns]
 
-target_scaler = StandardScaler()
-y = target_scaler.fit_transform(y.values.reshape(-1, 1))
-y = pd.Series(y.flatten())
+    return data
 
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+train_features = preprocess_data(train_features_df)
+test_features = preprocess_data(test_features_df, train_columns=train_features.columns)
 
-class HouseDataset(Dataset):
-    def __init__(self, X, y=None):
-        self.X = torch.tensor(X.values, dtype=torch.float32)
-        self.y = torch.tensor(y.values, dtype=torch.float32).view(-1, 1) if y is not None else None
+price_scaler = StandardScaler()
+scaled_train_prices = price_scaler.fit_transform(train_prices.values.reshape(-1, 1))
+scaled_train_prices = pd.Series(scaled_train_prices.flatten())
+
+
+X_train, X_val, y_train, y_val = train_test_split(train_features, scaled_train_prices, test_size=0.2, random_state=42)
+
+feature_scaler = StandardScaler()
+X_train = pd.DataFrame(X_train, columns=train_features.columns)
+X_val = pd.DataFrame(X_val, columns=train_features.columns)
+test_features = pd.DataFrame(test_features, columns=test_features.columns)
+
+class HousePriceDataset(Dataset):
+    def __init__(self, features, prices=None):
+        self.features = torch.tensor(features.values.astype(np.float32), dtype=torch.float32)
+        self.prices = torch.tensor(prices.values, dtype=torch.float32).view(-1, 1) if prices is not None else None
 
     def __len__(self):
-        return len(self.X)
+        return len(self.features)
 
     def __getitem__(self, idx):
-        return (self.X[idx], self.y[idx]) if self.y is not None else self.X[idx]
+        if self.prices is not None:
+            return self.features[idx], self.prices[idx]
+        else:
+            return self.features[idx]
 
-train_dataset = HouseDataset(X_train, y_train)
-val_dataset = HouseDataset(X_val, y_val)
-test_dataset = HouseDataset(test_df)
+train_dataset = HousePriceDataset(X_train, y_train)
+val_dataset = HousePriceDataset(X_val, y_val)
+test_dataset = HousePriceDataset(test_features)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 class HousePriceModel(nn.Module):
-    def __init__(self, input_size):
+    def __init__(self, input_dim):
+        print(input_dim)
         super(HousePriceModel, self).__init__()
         self.layers = nn.Sequential(
-            nn.Linear(input_size, 64),
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.15),
+            nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(0.25),
-            nn.Linear(64, 32),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(32, 1)
+            nn.Dropout(0.25),
+            nn.Linear(64, 1)
         )
 
     def forward(self, x):
         return self.layers(x)
 
-input_size = X_train.shape[1]
-model = HousePriceModel(input_size).to(DEVICE)
+input_dim = X_train.shape[1]
+model = HousePriceModel(input_dim).to(DEVICE)
 
-def rmse_loss(y_pred, y_true):
-    return torch.sqrt(torch.mean((y_pred - y_true)**2))
+def rmse_loss(predictions, targets):
+    return torch.sqrt(torch.mean((predictions - targets)**2))
 
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-6)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100, min_lr=1e-6)
 
-def train_model(model, train_loader, optimizer, epochs, device):
-    progress_bar = tqdm(range(epochs), desc='Training Progress', leave=True)
-    model.train()
-    for _ in progress_bar:
-        epoch_loss = 0
-        for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+def train_model(model, train_loader, val_loader, optimizer, scheduler, price_scaler, epochs, device, patience=20):
+    best_val_loss = float('inf')
+    best_model_state = None
+    no_improve_count = 0
+    history = {'train_loss': [], 'val_loss': [], 'val_mae': [], 'lr': []}
+
+    for epoch in range(epochs):
+        # Training phase
+        model.train()
+        train_losses = []
+
+        for features, prices in train_loader:
+            features = features.to(device)
+            prices = prices.to(device)
+
             optimizer.zero_grad()
-            outputs = model(X_batch)
-            loss = rmse_loss(outputs, y_batch)
+            predictions = model(features)
+            loss = rmse_loss(predictions, prices)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            train_losses.append(loss.item())
 
+        avg_train_loss = np.mean(train_losses)
+
+        # Validation phase
         model.eval()
-        all_preds_tensor = []
-        all_targets_tensor = []
+        val_losses = []
+        all_predictions = []
+        all_targets = []
+
         with torch.no_grad():
-            for X_batch, y_batch in val_loader:
-                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                outputs = model(X_batch)
-                all_preds_tensor.append(outputs)
-                all_targets_tensor.append(y_batch)
+            for features, prices in val_loader:
+                features = features.to(device)
+                prices = prices.to(device)
 
-        all_preds_tensor = torch.cat(all_preds_tensor).cpu().numpy()
-        all_targets_tensor = torch.cat(all_targets_tensor).cpu().numpy()
+                predictions = model(features)
+                loss = rmse_loss(predictions, prices)
+                val_losses.append(loss.item())
 
-        all_preds = target_scaler.inverse_transform(all_preds_tensor).flatten()
-        all_targets = target_scaler.inverse_transform(all_targets_tensor).flatten()
+                all_predictions.append(predictions)
+                all_targets.append(prices)
 
-        mae = np.mean(np.abs(all_preds - all_targets))
+        avg_val_loss = np.mean(val_losses)
 
-        model.train()
-        scheduler.step(np.mean(epoch_loss/len(train_loader)))
-        progress_bar.set_postfix(mae=mae, lr=scheduler.get_last_lr())
+        # Transform predictions back to original scale for MAE calculation
+        predictions_tensor = torch.cat(all_predictions).cpu()
+        targets_tensor = torch.cat(all_targets).cpu()
 
-train_model(model, train_loader, optimizer, EPOCHS, DEVICE)
+        predictions_orig = price_scaler.inverse_transform(predictions_tensor.numpy())
+        targets_orig = price_scaler.inverse_transform(targets_tensor.numpy())
 
+        val_mae = mean_absolute_error(targets_orig, predictions_orig)
+
+        # Save history
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['val_mae'].append(val_mae)
+        history['lr'].append(optimizer.param_groups[0]['lr'])
+
+        # Update learning rate
+        scheduler.step(avg_val_loss)
+
+        # Early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_state = model.state_dict().copy()
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
+
+        if no_improve_count >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+
+        # Print progress
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, "
+              f"Val MAE: ${val_mae:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    return model, history
+
+model, history = train_model(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    scheduler,
+    price_scaler,
+    EPOCHS,
+    DEVICE,
+    patience=200
+)
 model.eval()
-test_preds = []
+test_predictions = []
 with torch.no_grad():
-    for X_batch in test_loader:
-        X_batch = X_batch.to(DEVICE)
-        outputs = model(X_batch)
-        test_preds.extend(outputs.cpu().numpy())
+    for features in test_loader:
+        features = features.to(DEVICE)
+        outputs = model(features)
+        test_predictions.extend(outputs.cpu().numpy())
 
-test_preds = target_scaler.inverse_transform(test_preds).flatten()
+test_predictions = price_scaler.inverse_transform(test_predictions).flatten()
 
-submission = pd.DataFrame({'Id': test_df_ids, 'SalePrice': test_preds})
-print(submission)
+submission_df = pd.DataFrame({'Id': test_ids, 'SalePrice': test_predictions})
+print(submission_df)
