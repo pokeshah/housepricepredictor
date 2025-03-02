@@ -1,7 +1,7 @@
 """
 House Price Predictor for Kaggle's House Prices: Advanced Regression Techniques competition
 Uses a Deep AI approach instead of traditional Random Forrest Approach
-Current Accuracy: ~ $17k with only 100 epochs, 2 layers (can increase but need more compute)
+Current Accuracy: ~ $17k with only 1500 epochs, 2 layers (can increase but need more compute)
 """
 
 
@@ -23,16 +23,14 @@ EPOCHS = 3000
 DEVICE = torch.device("cpu") # Try CUDA on NVIDIA GPU or MPS on Apple Silicon (might yield faster performance)
 
 def preprocessdata(train_path, test_path):
-    """quick function for importing and preprocessing data"""
     train_df = pd.read_csv(train_path)
     test_df = pd.read_csv(test_path)
 
     y = train_df['SalePrice']
     X = train_df.drop(columns=['Id', 'SalePrice'])
-
+    test_df_ids = test_df['Id']
     test_df = test_df.drop(columns=['Id'])
 
-    
     categorical_cols = X.select_dtypes(include=['object']).columns
     for col in categorical_cols:
         le = LabelEncoder()
@@ -41,7 +39,6 @@ def preprocessdata(train_path, test_path):
         X[col] = le.fit_transform(X[col].astype(str))
         test_df[col] = test_df[col].map(lambda s: le.transform([s])[0] if s in le.classes_ else -1)
 
-    
     X.fillna(X.median(), inplace=True)
     test_df.fillna(test_df.median(), inplace=True)
 
@@ -49,42 +46,42 @@ def preprocessdata(train_path, test_path):
     X[X.columns] = scaler.fit_transform(X[X.columns])
     test_df[test_df.columns] = scaler.transform(test_df[test_df.columns])
 
-    return X, y, test_df
+    return X, y, test_df, test_df_ids
 
-X, y, test_df = preprocessdata(DATA_PATH_TRAIN, DATA_PATH_TEST)
+X, y, test_df, test_df_ids = preprocessdata(DATA_PATH_TRAIN, DATA_PATH_TEST)
 
 target_scaler = StandardScaler()
 y = target_scaler.fit_transform(y.values.reshape(-1, 1))
-y = pd.Series(y.flatten())  
+y = pd.Series(y.flatten())
 
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# createa  house dataset class to be used in dataloader
 class HouseDataset(Dataset):
-    def __init__(self, X, y):
+    def __init__(self, X, y=None):
         self.X = torch.tensor(X.values, dtype=torch.float32)
-        self.y = torch.tensor(y.values, dtype=torch.float32).view(-1, 1)
+        self.y = torch.tensor(y.values, dtype=torch.float32).view(-1, 1) if y is not None else None
 
     def __len__(self):
         return len(self.X)
 
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        return (self.X[idx], self.y[idx]) if self.y is not None else self.X[idx]
 
 train_dataset = HouseDataset(X_train, y_train)
 val_dataset = HouseDataset(X_val, y_val)
+test_dataset = HouseDataset(test_df)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 class HousePriceModel(nn.Module):
     def __init__(self, input_size):
         super(HousePriceModel, self).__init__()
-        # TODO: Experiement with more layers (but try to prevent overfitting)
         self.layers = nn.Sequential(
             nn.Linear(input_size, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.25),
             nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(0.5),
@@ -92,12 +89,7 @@ class HousePriceModel(nn.Module):
         )
 
     def forward(self, x):
-        embedded = self.embedding(x)  # (batch_size, seq_len, embed_dim)
-        embedded = embedded.unsqueeze(1) # adding a sequence dimension to allow multihead attention.
-        attention_output, _ = self.attention(embedded, embedded, embedded)
-        attention_output = attention_output.squeeze(1) # removing the sequence dimension after attention.
-        output = self.layers(attention_output)
-        return output
+        return self.layers(x)
 
 input_size = X_train.shape[1]
 model = HousePriceModel(input_size).to(DEVICE)
@@ -105,16 +97,8 @@ model = HousePriceModel(input_size).to(DEVICE)
 def rmse_loss(y_pred, y_true):
     return torch.sqrt(torch.mean((y_pred - y_true)**2))
 
-# criterion = nn.MSELoss() # TODO: Implement custm loss fucntion since Kaggle uses RMSD
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    mode='min',
-    factor=0.5,
-    patience=50,
-    min_lr=1e-6
-)
-
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-6)
 
 def train_model(model, train_loader, optimizer, epochs, device):
     progress_bar = tqdm(range(epochs), desc='Training Progress', leave=True)
@@ -150,21 +134,19 @@ def train_model(model, train_loader, optimizer, epochs, device):
 
         model.train()
         scheduler.step(np.mean(epoch_loss/len(train_loader)))
-        progress_bar.set_postfix(mae=mae, lr = scheduler.get_last_lr())
+        progress_bar.set_postfix(mae=mae, lr=scheduler.get_last_lr())
 
 train_model(model, train_loader, optimizer, EPOCHS, DEVICE)
 
 model.eval()
-all_preds = []
-all_targets = []
+test_preds = []
 with torch.no_grad():
-    for X_batch, y_batch in val_loader:
-        X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+    for X_batch in test_loader:
+        X_batch = X_batch.to(DEVICE)
         outputs = model(X_batch)
-        all_preds.extend(outputs.cpu().numpy())
-        all_targets.extend(y_batch.cpu().numpy())
+        test_preds.extend(outputs.cpu().numpy())
 
-all_preds = target_scaler.inverse_transform(all_preds).flatten()
-all_targets = target_scaler.inverse_transform(all_targets).flatten()
+test_preds = target_scaler.inverse_transform(test_preds).flatten()
 
-print(f"RMSD: {np.sqrt(np.mean((all_preds - all_targets)**2))}") # this is the metric used in Kaggle Leaderboard
+submission = pd.DataFrame({'Id': test_df_ids, 'SalePrice': test_preds})
+print(submission)
